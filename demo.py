@@ -10,8 +10,8 @@ from datetime import datetime
 from pathlib import Path
 
 from counting import (
-    CATEGORIES, CLASSES, DIRECTION_LABELS, REVIEW_LAST_FRAME, VEHICLE_LABELS,
-    CountingLine, load_reviewed_counts,
+    CATEGORIES, CLASSES, DIRECTION_LABELS, REFERENCE_FILE, REVIEW_LAST_FRAME, VEHICLE_LABELS,
+    CountingLine, load_reference_events,
 )
 from sample_data import ASSETS, VIDEO, WEIGHTS, prepare
 
@@ -32,12 +32,13 @@ from ultralytics.trackers.byte_tracker import BYTETracker
 from ultralytics.utils import IterableSimpleNamespace, YAML
 from ultralytics.utils.checks import check_yaml
 
-COLORS = {"car": (75, 220, 110), "motorcycle": (65, 190, 255)}
+COLORS = {"car": (75, 220, 110), "motorcycle": (65, 190, 255), "truck": (231, 141, 250)}
 ROOT = Path(__file__).resolve().parent
 WINDOW = "VnTraffic | Q / Esc"
 SUMMARY_SECONDS = 5
 PANEL_WIDTH = 408
-PANEL_COLUMNS = (208, 330)
+CHART_MAX = 16
+DIRECTION_COLORS = {"L-R": "#67c9ff", "R-L": "#ffbc6a"}
 
 
 def font(size, bold=False):
@@ -55,55 +56,62 @@ def counting_line_label():
     return cv2.cvtColor(np.asarray(label), cv2.COLOR_RGB2BGR)
 
 
-def count_rows(counts):
-    rows = [[counts.get((vehicle, direction), 0) for direction in DIRECTION_LABELS]
-            for vehicle in VEHICLE_LABELS]
-    totals = [sum(column) for column in zip(*rows)]
-    return [*rows, totals]
+def draw_count_chart(draw, counts):
+    legend_font = font(15)
+    for x, (direction, label) in zip((22, 206), DIRECTION_LABELS.items()):
+        draw.rounded_rectangle((x, 66, x + 15, 78), radius=3, fill=DIRECTION_COLORS[direction])
+        draw.text((x + 24, 72), label, font=legend_font, anchor="lm", fill="#e1eaf6")
+
+    draw.rounded_rectangle((20, 90, 388, 252), radius=10, fill="#1d2a3d", outline="#3d4d65")
+    plot_left, plot_right = 55, 372
+    plot_top, baseline = 112, 220
+    pixels_per_count = (baseline - plot_top) / CHART_MAX
+    tick_font = font(13)
+    for tick in range(0, CHART_MAX + 1, 4):
+        y = round(baseline - tick * pixels_per_count)
+        draw.line((plot_left, y, plot_right, y), fill="#495b72" if tick == 0 else "#35455b")
+        draw.text((46, y), str(tick), font=tick_font, anchor="rm", fill="#bdcadc")
+    draw.line((plot_left, plot_top, plot_left, baseline), fill="#495b72")
+
+    value_font = font(15, True)
+    vehicle_font = font(16, True)
+    group_width = (plot_right - plot_left) / len(VEHICLE_LABELS)
+    for i, (vehicle, label) in enumerate(VEHICLE_LABELS.items()):
+        center = round(plot_left + group_width * (i + 0.5))
+        draw.text((center, 236), label, font=vehicle_font, anchor="mm", fill="#eef4ff")
+        for x, direction in zip((center - 20, center + 20), DIRECTION_LABELS):
+            value = counts.get((vehicle, direction), 0)
+            y = round(baseline - min(value, CHART_MAX) * pixels_per_count)
+            color = DIRECTION_COLORS[direction]
+            draw.rectangle((x - 14, y, x + 14, max(y, baseline - 1)), fill=color)
+            draw.text((x, y - 3), str(value), font=value_font, anchor="mb", fill="white")
+            if value > CHART_MAX:
+                draw.polygon((x - 4, y + 8, x, y + 3, x + 4, y + 8), fill="#1d2a3d")
 
 
-def draw_count_table(draw, top, rows):
-    draw.rounded_rectangle((20, top, 388, top + 166), radius=10, fill="#1d2a3d", outline="#3d4d65")
-    heading_font = font(17, True)
-    draw.text((36, top + 20), "Loại xe", font=heading_font, anchor="lm", fill="#c3cfe1")
-    for x, direction in zip(PANEL_COLUMNS, DIRECTION_LABELS.values()):
-        draw.text((x, top + 20), direction, font=heading_font, anchor="mm", fill="#c3cfe1")
-
-    labels = (*VEHICLE_LABELS.values(), "Tổng")
-    label_colors = (*(COLORS[vehicle][::-1] for vehicle in VEHICLE_LABELS), "white")
-    for i, (label, color, values) in enumerate(zip(labels, label_colors, rows)):
-        y = top + 40 + i * 42
-        draw.line((34, y, 374, y), fill="#39495f")
-        bold = i == len(labels) - 1
-        draw.text((36, y + 21), label, font=font(20, bold), anchor="lm", fill=color)
-        for x, value in zip(PANEL_COLUMNS, values):
-            draw.text((x, y + 21), str(value), font=font(22, bold), anchor="mm", fill="white")
-
-
-def draw_reviewed_comparison(draw, review):
+def draw_reviewed_comparison(draw, reference, scoped):
     draw.text((20, 274), f"Đối chiếu Ground Truth · khung 0–{REVIEW_LAST_FRAME}",
               font=font(20, True), anchor="lm", fill="white")
     top = 296
-    draw.rounded_rectangle((20, top, 388, top + 160), radius=10, fill="#1d2a3d", outline="#3d4d65")
+    draw.rounded_rectangle((20, top, 388, top + 166), radius=10, fill="#1d2a3d", outline="#3d4d65")
     columns = (34, 126, 234, 329)
     anchors = ("lm", "lm", "mm", "mm")
     header_font = font(14, True)
-    for x, anchor, label in zip(columns, anchors, ("Loại xe", "Chiều đi", "Tham chiếu", "Demo đã duyệt")):
+    for x, anchor, label in zip(columns, anchors, ("Loại xe", "Chiều đi", "Tham chiếu", "Demo lần chạy")):
         draw.text((x, top + 17), label, font=header_font, anchor=anchor, fill="#c3cfe1")
     rows = [(VEHICLE_LABELS[vehicle], DIRECTION_LABELS[direction],
-             review.reference[vehicle, direction], review.demo[vehicle, direction])
+             reference[vehicle, direction], scoped[vehicle, direction])
             for vehicle, direction in CATEGORIES]
-    rows.append(("Tổng", "Cả hai chiều", sum(review.reference.values()), sum(review.demo.values())))
+    rows.append(("Tổng", "Cả hai chiều", sum(reference.values()), sum(scoped.values())))
     for index, row in enumerate(rows):
-        y = top + 34 + 25 * index
+        y = top + 31 + 19 * index
         draw.line((32, y, 376, y), fill="#39495f")
-        row_font = font(16, index == len(rows) - 1)
+        row_font = font(15, index == len(rows) - 1)
         for x, anchor, value in zip(columns, anchors, row):
-            draw.text((x, y + 12), str(value), font=row_font, anchor=anchor, fill="white")
-    draw.multiline_text((20, 467),
-                        "Số tham chiếu dùng quỹ đạo Ground Truth và\n"
-                        "loại xe đã xác nhận thủ công. Lượt ở khung 507\n"
-                        "nằm ngoài phạm vi đối chiếu.",
+            draw.text((x, y + 10), str(value), font=row_font, anchor=anchor, fill="white")
+    draw.multiline_text((20, 470),
+                        "Tham chiếu dùng quỹ đạo Ground Truth và loại\n"
+                        "xe đã xác nhận. Biểu đồ và CSV đếm toàn clip.",
                         font=font(15), spacing=3, fill="#c3cfe1")
 
 
@@ -111,12 +119,11 @@ def counter_panel(height, counts, review=None):
     panel = Image.new("RGB", (PANEL_WIDTH, height), "#141e2e")
     draw = ImageDraw.Draw(panel)
     draw.line((0, 0, 0, height), fill="#55657c", width=2)
-    draw.text((20, 44), "Lượt qua vạch", font=font(30, True), anchor="lm", fill="white")
-    system_rows = count_rows(counts)
-    draw_count_table(draw, 82, system_rows)
+    draw.text((20, 36), "Lượt qua vạch", font=font(30, True), anchor="lm", fill="white")
+    draw_count_chart(draw, counts)
 
     if review is not None:
-        draw_reviewed_comparison(draw, review)
+        draw_reviewed_comparison(draw, *review)
 
     return cv2.cvtColor(np.asarray(panel), cv2.COLOR_RGB2BGR)
 
@@ -145,7 +152,7 @@ def window_closed():
         return True
 
 
-def process(headless, folder, cache, total_cached, review):
+def process(headless, folder, cache, total_cached, reference):
     torch.set_num_threads(min(4, torch.get_num_threads()))
     model = YOLO(str(WEIGHTS))
     cap = cv2.VideoCapture(str(VIDEO))
@@ -166,6 +173,7 @@ def process(headless, folder, cache, total_cached, review):
     label_x = line.x - label_width // 2
     label_y = min(line.bottom + 2, height - label_height)
     counts = Counter()
+    scoped_counts = Counter()
     canvas = np.empty((height, output_size[0], 3), dtype=np.uint8)
     canvas[:, width:] = counter_panel(height, counts)
     trails = defaultdict(lambda: deque(maxlen=18))
@@ -207,6 +215,8 @@ def process(headless, folder, cache, total_cached, review):
                     direction = line.update(tid, point)
                     if direction:
                         counts[name, direction] += 1
+                        if frames <= REVIEW_LAST_FRAME:
+                            scoped_counts[name, direction] += 1
                         events.writerow([frames, round(frames / fps, 3), tid, name, direction])
                         changed = True
                     trail = trails[tid]
@@ -244,7 +254,7 @@ def process(headless, folder, cache, total_cached, review):
             raise RuntimeError("Video contains no readable frames.")
         complete = frames == expected
         if complete:
-            canvas[:, width:] = counter_panel(height, counts, review)
+            canvas[:, width:] = counter_panel(height, counts, (reference, scoped_counts))
             for _ in range(round(fps * SUMMARY_SECONDS)):
                 writer.write(canvas)
         writer.release()
@@ -256,8 +266,8 @@ def process(headless, folder, cache, total_cached, review):
         elapsed = time.perf_counter() - started
         print(f"{frames} frames in {elapsed:.1f} s, {frames / elapsed:.1f} FPS, {sum(counts.values())} crossings")
         if complete:
-            print(f"Ground Truth frames 0-{REVIEW_LAST_FRAME}: {sum(review.reference.values())} reference, "
-                  f"{sum(review.demo.values())} reviewed demo, {review.matched} correct matches")
+            print(f"Ground Truth frames 0-{REVIEW_LAST_FRAME}: {sum(reference.values())} reference, "
+                  f"{sum(scoped_counts.values())} demo in this run")
         print(f"Results: {folder}", flush=True)
         if complete and not headless:
             cv2.imshow(WINDOW, canvas)
@@ -281,7 +291,7 @@ def run(headless, resume=None):
             raise ValueError(f"No resumable checkpoint in {folder}")
     print(f"Run folder: {folder}", flush=True)
     fingerprint = hashlib.sha256()
-    for source in ("demo.py", "counting.py", "sample_data.py", "requirements.txt"):
+    for source in ("demo.py", "counting.py", "sample_data.py", "requirements.txt", REFERENCE_FILE):
         fingerprint.update((ROOT / source).read_bytes().replace(b"\r\n", b"\n"))
     with FileLock(str(folder / "run.lock"), timeout=0), closing(sqlite3.connect(folder / "checkpoint.sqlite")) as cache:
         with cache:
@@ -297,9 +307,10 @@ def run(headless, resume=None):
                 raise ValueError("Demo configuration changed. Start a new run without --resume.")
         cached = cache.execute("SELECT COUNT(*) FROM detections").fetchone()[0]
         print(f"Restoring {cached} cached frames." if cached else "Starting from frame 0.", flush=True)
-        review = load_reviewed_counts(ROOT / "doi-chieu-da-xac-nhan.csv")
+        reference = Counter((row["vehicle"], row["direction"])
+                            for row in load_reference_events(ROOT / REFERENCE_FILE))
         prepare()
-        process(headless, folder, cache, cached, review)
+        process(headless, folder, cache, cached, reference)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
-from counting import CountingLine, load_manual_counts, load_reviewed_counts
+from counting import CountingLine, REFERENCE_FILE, load_manual_counts, load_reference_events, load_reviewed_counts
 
 
 class CountingLineTests(unittest.TestCase):
@@ -55,13 +56,27 @@ class ManualCountTests(unittest.TestCase):
 
 
 class ReviewedCountTests(unittest.TestCase):
-    def test_packaged_counts(self):
+    def test_two_class_baseline(self):
         path = Path(__file__).resolve().with_name("doi-chieu-da-xac-nhan.csv")
         review = load_reviewed_counts(path)
         self.assertEqual(review.reference, {("car", "R-L"): 7, ("motorcycle", "L-R"): 9, ("motorcycle", "R-L"): 2})
         self.assertEqual(review.demo, {("car", "L-R"): 2, ("car", "R-L"): 6,
                                       ("motorcycle", "L-R"): 11, ("motorcycle", "R-L"): 1})
         self.assertEqual(review.matched, 16)
+
+    def test_three_class_reference(self):
+        path = Path(__file__).resolve().with_name(REFERENCE_FILE)
+        events = load_reference_events(path)
+        self.assertEqual(len(events), 21)
+        self.assertEqual(len({(row["track_id"], row["frame"]) for row in events}), 21)
+        counts = Counter((row["vehicle"], row["direction"]) for row in events)
+        self.assertEqual(
+            tuple(counts[vehicle, direction]
+                  for vehicle in ("car", "motorcycle", "truck") for direction in ("L-R", "R-L")),
+            (0, 7, 9, 2, 1, 2),
+        )
+        self.assertEqual([row["review_id"] for row in events if row["vehicle"] == "truck"],
+                         ["L06", "L12", "L22"])
 
     def test_scope_and_manual_pair_confirmation(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -2,11 +2,12 @@ import csv
 from collections import Counter
 from dataclasses import dataclass
 
-CLASSES = {2: "car", 3: "motorcycle"}
-VEHICLE_LABELS = {"car": "Ô tô con", "motorcycle": "Xe máy"}
+CLASSES = {2: "car", 3: "motorcycle", 7: "truck"}
+VEHICLE_LABELS = {"car": "Ô tô con", "motorcycle": "Xe máy", "truck": "Xe tải"}
 DIRECTION_LABELS = {"L-R": "Trái → phải", "R-L": "Phải → trái"}
 CATEGORIES = tuple((vehicle, direction) for vehicle in CLASSES.values() for direction in DIRECTION_LABELS)
 REVIEW_LAST_FRAME = 500
+REFERENCE_FILE = "tham-chieu-ba-lop.csv"
 
 
 @dataclass
@@ -119,3 +120,17 @@ def load_reviewed_counts(path):
                 matched += 1
 
     return ReviewedCounts(reference, demo, matched)
+
+
+def load_reference_events(path):
+    """Load one row per independently confirmed Ground Truth crossing."""
+    with path.open(newline="", encoding="utf-8-sig") as stream:
+        rows = list(csv.DictReader(stream))
+    for row in rows:
+        row["frame"] = int(row["frame"])
+        row["track_id"] = int(row["track_id"])
+        row["crossing_time"] = float(row["crossing_time"])
+        row["crossing_y"] = float(row["crossing_y"])
+        if not 0 <= row["frame"] <= REVIEW_LAST_FRAME or (row["vehicle"], row["direction"]) not in CATEGORIES:
+            raise ValueError(f"Invalid reference event: {row['review_id']}")
+    return rows
